@@ -727,6 +727,8 @@ message PhysicalPlanNode {
     UnnestExecNode unnest = 30;
     JsonScanExecNode json_scan = 31;
     CooperativeExecNode cooperative = 32;
+    SortMergeJoinExecNode sort_merge_join = 34;
+
   }
 }
 
@@ -1290,4 +1292,14 @@ message RecursiveQueryNode {
 message CteWorkTableScanNode {
     string name = 1;
     datafusion_common.Schema schema = 2;
+}
+
+message SortMergeJoinExecNode {
+  PhysicalPlanNode left = 1;
+  PhysicalPlanNode right = 2;
+  repeated JoinOn on = 3;
+  datafusion_common.JoinType join_type = 4;
+  JoinFilter filter = 5;
+  repeated SortExprNode sort_options = 6;
+  datafusion_common.NullEquality null_equality = 7;
 }
