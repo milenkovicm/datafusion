@@ -33,7 +33,7 @@ use datafusion_datasource::memory::{MemSink, MemorySourceConfig};
 use datafusion_datasource::sink::DataSinkExec;
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_expr::dml::InsertOp;
-use datafusion_expr::{Expr, SortExpr, TableType};
+use datafusion_expr::{Expr, LogicalPlan, SortExpr, TableType};
 use datafusion_physical_expr::{create_physical_sort_exprs, LexOrdering};
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::{
@@ -294,5 +294,60 @@ impl TableProvider for MemTable {
 
     fn get_column_default(&self, column: &str) -> Option<&Expr> {
         self.column_defaults.get(column)
+    }
+}
+/// Represents a table that, at the time of query planning, possesses only a logical representation
+/// and lacks a concrete, materialized form. It is the responsibility of the user to implement
+/// a query planner rule that replaces this table with an actual materialized table during execution.
+#[derive(Debug)]
+pub struct UnresolvedTable {
+    /// represents session which owns the relation
+    pub session_id: String,
+    /// unique relation id
+    pub relation_id: String,
+    /// logical plan to be used to resolve,
+    /// materialize this table
+    pub logical_plan: LogicalPlan,
+    schema: SchemaRef,
+}
+
+impl UnresolvedTable {
+    pub fn new(
+        session_id: String,
+        relation_id: String,
+        logical_plan: LogicalPlan,
+    ) -> Self {
+        let schema = logical_plan.schema().as_arrow().clone().into();
+        Self {
+            session_id,
+            relation_id,
+            logical_plan,
+            schema,
+        }
+    }
+}
+
+#[async_trait]
+impl TableProvider for UnresolvedTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Temporary
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        plan_err!("Unresolved table should be resolved by user provided query planner")
     }
 }

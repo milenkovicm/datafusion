@@ -49,6 +49,7 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, Int64Array, StringArray};
 use arrow::compute::{cast, concat};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion_catalog::memory::UnresolvedTable;
 use datafusion_common::config::{CsvOptions, JsonOptions};
 use datafusion_common::{
     exec_err, not_impl_err, plan_datafusion_err, plan_err, Column, DFSchema,
@@ -2221,14 +2222,39 @@ impl DataFrame {
     /// # }
     /// ```
     pub async fn cache(self) -> Result<DataFrame> {
-        let context = SessionContext::new_with_state((*self.session_state).clone());
-        // The schema is consistent with the output
-        let plan = self.clone().create_physical_plan().await?;
-        let schema = plan.schema();
-        let task_ctx = Arc::new(self.task_ctx());
-        let partitions = collect_partitioned(plan, task_ctx).await?;
-        let mem_table = MemTable::try_new(schema, partitions)?;
-        context.read_table(Arc::new(mem_table))
+        if self
+            .session_state
+            .config()
+            .options()
+            .execution
+            .external_cache
+        {
+            let (session_state, plan) = self.into_parts();
+
+            let table_source = Arc::new(UnresolvedTable::new(
+                session_state.session_id().to_owned(),
+                uuid::Uuid::new_v4().to_string(),
+                plan,
+            ));
+
+            let plan = LogicalPlanBuilder::scan(
+                "?cache?",
+                provider_as_source(table_source),
+                None,
+            )?
+            .build()?;
+
+            Ok(DataFrame::new(session_state, plan))
+        } else {
+            let context = SessionContext::new_with_state((*self.session_state).clone());
+            // The schema is consistent with the output
+            let plan = self.clone().create_physical_plan().await?;
+            let schema = plan.schema();
+            let task_ctx = Arc::new(self.task_ctx());
+            let partitions = collect_partitioned(plan, task_ctx).await?;
+            let mem_table = MemTable::try_new(schema, partitions)?;
+            context.read_table(Arc::new(mem_table))
+        }
     }
 
     /// Apply an alias to the DataFrame.

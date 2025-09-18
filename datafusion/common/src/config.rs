@@ -501,6 +501,11 @@ config_namespace! {
         /// written, it may be necessary to increase this size to avoid errors from
         /// the remote end point.
         pub objectstore_writer_buffer_size: usize, default = 10 * 1024 * 1024
+
+        /// Determines whether DataFusion delegates `DataFrame::cache` materialization
+        /// to an external subsystem. If set to `false`, DataFusion will materialize
+        /// the cache internally as a `MemTable`.
+        pub external_cache: bool, default = false
     }
 }
 

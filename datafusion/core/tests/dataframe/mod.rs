@@ -33,6 +33,7 @@ use arrow::datatypes::{
 use arrow::error::ArrowError;
 use arrow::util::pretty::pretty_format_batches;
 use datafusion::{assert_batches_eq, dataframe};
+use datafusion_catalog::memory::UnresolvedTable;
 use datafusion_functions_aggregate::count::{count_all, count_all_window};
 use datafusion_functions_aggregate::expr_fn::{
     array_agg, avg, count, count_distinct, max, median, min, sum,
@@ -48,7 +49,7 @@ use tempfile::TempDir;
 use url::Url;
 
 use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
-use datafusion::datasource::MemTable;
+use datafusion::datasource::{DefaultTableSource, MemTable};
 use datafusion::error::Result;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -77,7 +78,7 @@ use datafusion_expr::var_provider::{VarProvider, VarType};
 use datafusion_expr::{
     cast, col, create_udf, exists, in_subquery, lit, out_ref_col, placeholder,
     scalar_subquery, when, wildcard, Expr, ExprFunctionExt, ExprSchemable, LogicalPlan,
-    LogicalPlanBuilder, ScalarFunctionImplementation, SortExpr, WindowFrame,
+    LogicalPlanBuilder, ScalarFunctionImplementation, SortExpr, TableScan, WindowFrame,
     WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition,
 };
 use datafusion_physical_expr::expressions::Column;
@@ -2111,6 +2112,38 @@ async fn test_cache_mismatch() -> Result<()> {
         .await?;
     let cache_df = df.cache().await;
     assert!(cache_df.is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cache_external() -> Result<()> {
+    let ctx = SessionContext::new();
+    let test_data = parquet_test_data();
+
+    ctx.register_parquet(
+        "alltypes_tiny_pages",
+        &format!("{test_data}/alltypes_tiny_pages.parquet"),
+        ParquetReadOptions::default(),
+    )
+    .await?;
+
+    ctx.sql("SET datafusion.execution.external_cache = true")
+        .await?
+        .collect()
+        .await?;
+    let df = ctx
+        .sql("SELECT * from alltypes_tiny_pages where bool_col = true")
+        .await?;
+    let cache_df = df.cache().await;
+    assert!(cache_df.is_ok());
+
+    matches!(
+        cache_df?.logical_plan(),
+        LogicalPlan::TableScan(
+            TableScan { source, .. }
+        ) if source.as_any().downcast_ref::<DefaultTableSource>().unwrap().table_provider.as_any().downcast_ref::<UnresolvedTable>().is_some(),
+    );
+
     Ok(())
 }
 
