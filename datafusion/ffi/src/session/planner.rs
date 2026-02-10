@@ -195,20 +195,14 @@ impl Clone for FFI_QueryPlanner {
 }
 
 #[derive(Debug)]
-pub struct ForeignQueryPlanner(
-    pub FFI_QueryPlanner,
-    // pub Arc<dyn LogicalExtensionCodec + Send>,
-);
+pub struct ForeignQueryPlanner(pub FFI_QueryPlanner);
 
 impl From<&FFI_QueryPlanner> for Arc<dyn QueryPlanner> {
     fn from(planner: &FFI_QueryPlanner) -> Self {
         if (planner.library_marker_id)() == crate::get_library_marker_id() {
             Arc::clone(planner.inner())
         } else {
-            Arc::new(ForeignQueryPlanner(
-                planner.clone(),
-                // Arc::new(DefaultLogicalExtensionCodec {}),
-            ))
+            Arc::new(ForeignQueryPlanner(planner.clone()))
         }
     }
 }
