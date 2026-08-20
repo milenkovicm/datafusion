@@ -2212,6 +2212,7 @@ dependencies = [
  "datafusion-catalog",
  "datafusion-common",
  "datafusion-datasource",
+ "datafusion-datasource-csv",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-functions",
@@ -2230,9 +2231,11 @@ dependencies = [
  "futures",
  "libloading",
  "log",
+ "object_store",
  "prost",
  "semver",
  "stabby",
+ "tempfile",
  "tokio",
 ]
 

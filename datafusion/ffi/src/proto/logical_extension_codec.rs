@@ -40,6 +40,7 @@ use tokio::runtime::Handle;
 
 use crate::arrow_wrappers::WrappedSchema;
 use crate::execution::FFI_TaskContextProvider;
+use crate::file_format::FFI_FileFormatFactory;
 use crate::table_provider::FFI_TableProvider;
 use crate::udaf::FFI_AggregateUDF;
 use crate::udf::FFI_ScalarUDF;
@@ -65,6 +66,14 @@ pub struct FFI_LogicalExtensionCodec {
         table_ref: SStr,
         node: FFI_TableProvider,
     ) -> FFI_Result<SVec<u8>>,
+
+    /// Decode bytes into a file format factory.
+    try_decode_file_format:
+        unsafe extern "C" fn(&Self, buf: SSlice<u8>) -> FFI_Result<FFI_FileFormatFactory>,
+
+    /// Encode a file format factory into bytes.
+    try_encode_file_format:
+        unsafe extern "C" fn(&Self, node: FFI_FileFormatFactory) -> FFI_Result<SVec<u8>>,
 
     /// Decode bytes into a user defined scalar function.
     try_decode_udf: unsafe extern "C" fn(
@@ -190,6 +199,37 @@ unsafe extern "C" fn try_encode_table_provider_fn_wrapper(
     FFI_Result::Ok(bytes.into_iter().collect())
 }
 
+unsafe extern "C" fn try_decode_file_format_fn_wrapper(
+    codec: &FFI_LogicalExtensionCodec,
+    buf: SSlice<u8>,
+) -> FFI_Result<FFI_FileFormatFactory> {
+    let ctx = sresult_return!(codec.task_ctx());
+    let runtime = codec.runtime().clone();
+    let codec_inner = codec.inner();
+
+    let file_format_factory =
+        sresult_return!(codec_inner.try_decode_file_format(buf.as_ref(), ctx.as_ref()));
+
+    FFI_Result::Ok(FFI_FileFormatFactory::new_with_ffi_codec(
+        file_format_factory,
+        runtime,
+        codec.clone(),
+    ))
+}
+
+unsafe extern "C" fn try_encode_file_format_fn_wrapper(
+    codec: &FFI_LogicalExtensionCodec,
+    node: FFI_FileFormatFactory,
+) -> FFI_Result<SVec<u8>> {
+    let file_format_factory: Arc<dyn FileFormatFactory> = (&node).into();
+    let codec = codec.inner();
+
+    let mut bytes = Vec::new();
+    sresult_return!(codec.try_encode_file_format(&mut bytes, file_format_factory));
+
+    FFI_Result::Ok(bytes.into_iter().collect())
+}
+
 unsafe extern "C" fn try_decode_udf_fn_wrapper(
     codec: &FFI_LogicalExtensionCodec,
     name: SStr,
@@ -311,6 +351,8 @@ impl FFI_LogicalExtensionCodec {
         Self {
             try_decode_table_provider: try_decode_table_provider_fn_wrapper,
             try_encode_table_provider: try_encode_table_provider_fn_wrapper,
+            try_decode_file_format: try_decode_file_format_fn_wrapper,
+            try_encode_file_format: try_encode_file_format_fn_wrapper,
             try_decode_udf: try_decode_udf_fn_wrapper,
             try_encode_udf: try_encode_udf_fn_wrapper,
             try_decode_udaf: try_decode_udaf_fn_wrapper,
@@ -418,18 +460,28 @@ impl LogicalExtensionCodec for ForeignLogicalExtensionCodec {
 
     fn try_decode_file_format(
         &self,
-        _buf: &[u8],
+        buf: &[u8],
         _ctx: &TaskContext,
     ) -> Result<Arc<dyn FileFormatFactory>> {
-        not_impl_err!("FFI does not support decode_file_format")
+        let ffi_file_format_factory =
+            unsafe { df_result!((self.0.try_decode_file_format)(&self.0, buf.into())) }?;
+
+        Ok((&ffi_file_format_factory).into())
     }
 
     fn try_encode_file_format(
         &self,
-        _buf: &mut Vec<u8>,
-        _node: Arc<dyn FileFormatFactory>,
+        buf: &mut Vec<u8>,
+        node: Arc<dyn FileFormatFactory>,
     ) -> Result<()> {
-        not_impl_err!("FFI does not support encode_file_format")
+        let node = FFI_FileFormatFactory::new_with_ffi_codec(node, None, self.0.clone());
+
+        let bytes =
+            df_result!(unsafe { (self.0.try_encode_file_format)(&self.0, node) })?;
+
+        buf.extend(bytes);
+
+        Ok(())
     }
 
     fn try_decode_udf(&self, name: &str, buf: &[u8]) -> Result<Arc<ScalarUDF>> {
@@ -498,6 +550,7 @@ mod tests {
     use datafusion_catalog::{MemTable, TableProvider};
     use datafusion_common::{Result, TableReference, exec_err};
     use datafusion_datasource::file_format::FileFormatFactory;
+    use datafusion_datasource_csv::file_format::CsvFormatFactory;
     use datafusion_execution::TaskContext;
     use datafusion_expr::ptr_eq::arc_ptr_eq;
     use datafusion_expr::{AggregateUDF, Extension, LogicalPlan, ScalarUDF, WindowUDF};
@@ -505,6 +558,7 @@ mod tests {
     use datafusion_functions_aggregate::sum::Sum;
     use datafusion_functions_window::rank::{Rank, RankType};
     use datafusion_proto::logical_plan::LogicalExtensionCodec;
+    use datafusion_proto::logical_plan::file_formats::CsvLogicalExtensionCodec;
     use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 
     use crate::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
@@ -579,18 +633,18 @@ mod tests {
 
         fn try_decode_file_format(
             &self,
-            _buf: &[u8],
-            _ctx: &TaskContext,
+            buf: &[u8],
+            ctx: &TaskContext,
         ) -> Result<Arc<dyn FileFormatFactory>> {
-            unimplemented!()
+            CsvLogicalExtensionCodec.try_decode_file_format(buf, ctx)
         }
 
         fn try_encode_file_format(
             &self,
-            _buf: &mut Vec<u8>,
-            _node: Arc<dyn FileFormatFactory>,
+            buf: &mut Vec<u8>,
+            node: Arc<dyn FileFormatFactory>,
         ) -> Result<()> {
-            unimplemented!()
+            CsvLogicalExtensionCodec.try_encode_file_format(buf, node)
         }
 
         fn try_decode_udf(&self, name: &str, buf: &[u8]) -> Result<Arc<ScalarUDF>> {
@@ -640,6 +694,32 @@ mod tests {
         )?;
 
         assert!(returned_table.is::<MemTable>());
+
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrip_ffi_logical_extension_codec_file_format() -> Result<()> {
+        let codec = Arc::new(TestExtensionCodec {});
+        let (ctx, task_ctx_provider) = crate::util::tests::test_session_and_ctx();
+
+        let mut ffi_codec =
+            FFI_LogicalExtensionCodec::new(codec, None, task_ctx_provider);
+        ffi_codec.library_marker_id = crate::mock_foreign_marker_id;
+        let foreign_codec: Arc<dyn LogicalExtensionCodec> = (&ffi_codec).into();
+
+        let factory = Arc::new(CsvFormatFactory::new()) as Arc<dyn FileFormatFactory>;
+        let mut bytes = Vec::new();
+        foreign_codec.try_encode_file_format(&mut bytes, factory)?;
+
+        let returned_factory =
+            foreign_codec.try_decode_file_format(&bytes, ctx.task_ctx().as_ref())?;
+
+        assert!(
+            returned_factory
+                .downcast_ref::<CsvFormatFactory>()
+                .is_some()
+        );
 
         Ok(())
     }
